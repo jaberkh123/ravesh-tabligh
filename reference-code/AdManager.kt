@@ -28,8 +28,15 @@ import java.util.concurrent.TimeUnit
  *   • سرور: https://golestanjaber.ir  →  GET /api/v2/api.php?app=<slug>&only=icons
  *   • پاسخ JSON شامل گروه آیکون‌های تبلیغاتی (icons[]) است.
  *   • چرخش آیکون‌ها سمتِ سرور و زمان‌محور است؛ اپ فقط هر دوره دوباره درخواست می‌دهد.
- *   • تپ روی هر آیکون باید فقط «click_url» همان آیکون را باز کند (شمارندهٔ آمار
- *     + ریدایرکت خودکار به صفحهٔ دانلود). هرگز download_url مستقیم باز نمی‌شود.
+ *   • مقصد تپ کاربر:
+ *       destination = "bazaar" (یا تشخیص خودکار پکیج از لینک) → اپِ کافه‌بازار
+ *       مستقیماً با bazaar://details?id=<package_name> و setPackage("com.farsitel.bazaar")
+ *       باز می‌شود — نه مرورگر و نه انتخابگر برنامه. آمار کلیک هم در پس‌زمینه با
+ *       یک درخواست به click_url + &via=app ثبت می‌شود (پاسخ 204، بدون ریدایرکت).
+ *       اگر بازار نصب نبود → صفحهٔ وب بازار (fallback).
+ *       destination = "web" → رفتار قبلی: باز شدن click_url با مرورگر
+ *       (شمارندهٔ سرور + ریدایرکت خودکار به صفحهٔ دانلود).
+ *   • هرگز download_url مستقیم باز نمی‌شود.
  *   • خطاها و نبودِ اینترنت → بخش تبلیغ مخفی می‌شود؛ هیچ‌وقت کرش یا قفل نمی‌کند.
  */
 
@@ -52,6 +59,10 @@ data class IconAd(
     val imageUrl: String? = null,
     val clickUrl: String? = null,
     val downloadUrl: String? = null,
+    /** مقصد کلیک از سرور: "bazaar" (اپ کافه‌بازار) یا "web" (مرورگر) — سرورهای قدیمی null می‌دهند. */
+    val destination: String? = null,
+    /** نام پکیج اپ مقصد در کافه‌بازار — فقط وقتی destination = bazaar معنا دارد. */
+    val packageName: String? = null,
     val clicks: Int? = null,
 )
 
@@ -237,6 +248,8 @@ object AdManager {
                             imageUrl = imageUrl,
                             clickUrl = clickUrl,
                             downloadUrl = o.optStringOrNull("download_url"),
+                            destination = o.optStringOrNull("destination"),
+                            packageName = o.optStringOrNull("package_name"),
                             clicks = o.optIntOrNull("clicks"),
                         )
                     )
@@ -257,6 +270,8 @@ object AdManager {
                             clickUrl = clickUrl,
                             downloadUrl = obj.optStringOrNull("download_url")
                                 ?: obj.optStringOrNull("target_url"),
+                            destination = obj.optStringOrNull("destination"),
+                            packageName = obj.optStringOrNull("package_name"),
                             clicks = obj.optIntOrNull("clicks"),
                         )
                     )
@@ -276,11 +291,47 @@ object AdManager {
     // ── کلیک روی آیکون ───────────────────────────────────────────────────────
 
     /**
-     * قانون طلایی ۱ و ۲ مستند: تپ کاربر فقط و فقط «click_url» همان آیکون را
-     * با یک مرورگر واقعی باز می‌کند تا شمارندهٔ کلیک سرور ثبت شود.
+     * مقصد تپ کاربر (قانون طلایی نسخهٔ ۲):
+     *  ۱) اگر مقصد کافه‌بازار است (destination=bazaar از سرور، یا تشخیص خودکار پکیج
+     *     از روی لینک‌های قدیمی) → اول کلیک در پس‌زمینه به شمارندهٔ سرور گزارش می‌شود
+     *     (click_url + &via=app)، بعد اپِ بازار مستقیماً با bazaar://details?id=<pkg>
+     *     و setPackage("com.farsitel.bazaar") باز می‌شود — بدون مرورگر و انتخابگر برنامه.
+     *     اگر بازار نصب نبود → صفحهٔ وب بازار (fallback؛ آمار قبلاً ثبت شده).
+     *  ۲) در غیر این صورت (مقصد وب) → همان رفتار همیشگی: باز کردن click_url با مرورگر؛
+     *     سرور کلیک را ثبت و به صفحهٔ دانلود ریدایرکت می‌کند.
      */
-    fun openAd(context: Context, clickUrl: String?) {
-        val url = clickUrl?.takeIf { it.startsWith("http") } ?: return
+    fun openAd(context: Context, ad: IconAd) {
+        val pkg = ad.packageName?.takeIf { it.isNotBlank() }
+            ?: bazaarPackageFromUrl(ad.clickUrl)
+            ?: bazaarPackageFromUrl(ad.downloadUrl)
+
+        if (pkg != null) {
+            // ۱) ثبت آمار کلیک — درخواست پس‌زمینه؛ شکستش هیچ اثری روی UI ندارد.
+            pingClickCounter(ad.clickUrl)
+
+            // ۲) باز شدن مستقیم اپ کافه‌بازار روی صفحهٔ همین پکیج — بدون مرورگر.
+            val opened = runCatching {
+                context.startActivity(
+                    Intent(Intent.ACTION_VIEW, Uri.parse("bazaar://details?id=$pkg"))
+                        .setPackage("com.farsitel.bazaar")
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                true
+            }.getOrDefault(false)
+            if (opened) return
+
+            // ۳) بازار نصب نیست → صفحهٔ وب بازار (آمار قبلاً با via=app ثبت شده است).
+            runCatching {
+                context.startActivity(
+                    Intent(Intent.ACTION_VIEW, Uri.parse("https://cafebazaar.ir/app/$pkg"))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            }
+            return
+        }
+
+        // مقصد وب — رفتار قبلی: مرورگر click_url را باز می‌کند (شمارنده + ریدایرکت).
+        val url = ad.clickUrl?.takeIf { it.startsWith("http") } ?: return
         runCatching {
             context.startActivity(
                 Intent(Intent.ACTION_VIEW, Uri.parse(url))
@@ -289,9 +340,58 @@ object AdManager {
         }
     }
 
+    /** سازگاری با کد قدیمی — تپ فقط با لینک: تشخیص خودکار بازار از روی خود لینک انجام می‌شود. */
+    fun openAd(context: Context, clickUrl: String?) {
+        openAd(context, IconAd(slot = 0, clickUrl = clickUrl))
+    }
+
+    /**
+     * استخراج نام پکیج کافه‌بازار از یک لینک (مثل https://cafebazaar.ir/app/com.example.app).
+     * لینک‌های قدیمیِ پنل که فقط لینک بازار بودند هم بدون مهاجرت درست باز می‌شوند.
+     */
+    fun bazaarPackageFromUrl(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+        val pkg = BAZAAR_PKG_REGEX.find(url)?.groupValues?.get(1) ?: return null
+        return pkg.trim('.').takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * گزارش کلیک به شمارندهٔ سرور در پس‌زمینه (حالت پکیجی — چون اپ خودش بازار را باز
+     * می‌کند، دیگر از مسیر مرورگر/ریدایرکت عبور نمی‌کنیم). سرور برای درخواست‌های
+     * via=app پاسخ 204 می‌دهد و کلیک را مثل کلیک مرورگری ثبت می‌کند.
+     * fire-and-forget: هیچ منتظر پاسخ نمی‌مانیم و هیچ خطایی بیرون نمی‌زند.
+     */
+    private fun pingClickCounter(clickUrl: String?) {
+        val url = clickUrl?.takeIf { it.startsWith("http") } ?: return
+        val trackedUrl = url + (if (url.contains('?')) "&" else "?") + "via=app"
+        val request = try {
+            Request.Builder()
+                .url(trackedUrl)
+                .header("User-Agent", "TablighApp/1.0 (Android; ad-click)")
+                .header("Cache-Control", "no-cache")
+                .build()
+        } catch (e: Exception) {
+            Log.d(TAG, "ping url invalid: ${e.message}")
+            return
+        }
+        http.newCall(request).enqueue(object : okhttp3.Callback {
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                response.use { it.close() } // بدنه لازم نیست؛ فقط ثبت کلیک سرور مهم است
+            }
+
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                // بی‌صدا — شکست ثبت آمار هرگز تجربهٔ کاربر را نمی‌شکند
+                Log.d(TAG, "click ping failed: ${e.message}")
+            }
+        })
+    }
+
     // ── ابزارها ──────────────────────────────────────────────────────────────
 
     private const val TAG = "AdManager"
+
+    private val BAZAAR_PKG_REGEX =
+        Regex("""cafebazaar\.ir/app/([A-Za-z0-9_.]+)""", RegexOption.IGNORE_CASE)
 
     private fun urlEncode(v: String): String =
         java.net.URLEncoder.encode(v, "UTF-8")

@@ -72,12 +72,43 @@ fun onAppForegrounded() {
   *(در اپ نمونه: آیتم بدون image حذف می‌شود؛ بدون click_url نگه داشته می‌شود اما تپ کاری نمی‌کند.)*
 - پارس با `org.json` (داخل اندروید) — نیازی به Gson/Moshi نیست، حجم صفر.
 
-## ۲.۵ openAd — قانون طلایی ۱
+## ۲.۵ openAd — قانون طلایی ۱ (نسخهٔ ۲ با حالت پکیجی)
 
 ```kotlin
-fun openAd(context: Context, clickUrl: String?) {
-    val url = clickUrl?.takeIf { it.startsWith("http") } ?: return   // گارد URL غیر http
-    runCatching {                                                     // گارد نبود مرورگر
+fun openAd(context: Context, ad: IconAd) {
+    // ۱) تشخیص مقصد بازار: فیلد رسمی سرور یا تشخیص خودکار از روی لینک‌های قدیمی
+    val pkg = ad.packageName?.takeIf { it.isNotBlank() }
+        ?: bazaarPackageFromUrl(ad.clickUrl)
+        ?: bazaarPackageFromUrl(ad.downloadUrl)
+
+    if (pkg != null) {
+        // ۲) ثبت آمار — درخواست پس‌زمینه به click_url + &via=app (سرور: پاسخ 204)
+        pingClickCounter(ad.clickUrl)
+
+        // ۳) باز شدن مستقیم اپ بازار — بدون مرورگر و بدون انتخابگر برنامه
+        val opened = runCatching {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse("bazaar://details?id=$pkg"))
+                    .setPackage("com.farsitel.bazaar")
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            true
+        }.getOrDefault(false)
+        if (opened) return
+
+        // ۴) بازار نصب نیست → صفحهٔ وب بازار (آمار قبلاً ثبت شده)
+        runCatching {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse("https://cafebazaar.ir/app/$pkg"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }
+        return
+    }
+
+    // مقصد وب — رفتار قبلی: مرورگر click_url را باز می‌کند (شمارنده + ریدایرکت)
+    val url = ad.clickUrl?.takeIf { it.startsWith("http") } ?: return
+    runCatching {
         context.startActivity(
             Intent(Intent.ACTION_VIEW, Uri.parse(url))
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -86,8 +117,17 @@ fun openAd(context: Context, clickUrl: String?) {
 }
 ```
 
-- فقط `click_url` — **هرگز** `download_url` (آمار کلیک از مسیر click.php ثبت می‌شود).
-- `runCatching` حتی اگر هیچ مرورگری نبود هم کرش نمی‌کند.
+- **چرا `setPackage` حیاتی است؟** بدون آن، اندروید برای لینک بازار ممکن است انتخابگر برنامه
+  یا مرورگر را نشان دهد؛ با `setPackage("com.farsitel.bazaar")` دقیقاً خود اپ بازار باز می‌شود
+  و اگر نصب نباشد `ActivityNotFoundException` می‌دهیم → fallback وب.
+- **چرا آمار با `via=app`؟** چون اپ خودش بازار را باز می‌کند، دیگر از مسیر مرورگر/ریدایرکت
+  click.php عبور نمی‌کنیم؛ گزارش پس‌زمینهٔ `via=app` همان کلیک را کامل ثبت می‌کند (پاسخ 204
+  بدون ریدایرکت تا درخواست بی‌خودی صفحهٔ وب را هم دانلود نکند).
+- **تشخیص خودکار پکیج:** لینک‌های قدیمیِ `cafebazaar.ir/app/<pkg>` هم بدون هیچ مهاجرتی
+  با `bazaarPackageFromUrl` پشتیبانی می‌شوند — اپ آپدیت‌شده از قبل هم رفتار جدید دارد.
+- فقط `click_url` مسیر آمار است — **هرگز** `download_url` مستقیم باز نمی‌شود.
+- سازگاری: امضای قدیمی `openAd(context, clickUrl: String?)` هم هنوز هست و داخلش به همین
+  تابع جدید دِلِگیت می‌کند (تشخیص خودکار بازار از روی خود لینک).
 
 ## ۲.۶ کلید خاموش/روشن
 

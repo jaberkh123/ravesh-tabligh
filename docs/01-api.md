@@ -33,6 +33,8 @@ GET {BASE_URL}/api/v2/api.php?app=<slug>&only=icons[&key=<api_key>]
       "image_url": "https://golestanjaber.ir/uploads/icons/ad1.png",
       "click_url": "https://golestanjaber.ir/api/v2/click.php?app=<slug>&slot=1",
       "download_url": "https://example.com/dl/app1.apk",
+      "destination": "bazaar",                     // "bazaar" یا "web" (جدید)
+      "package_name": "com.example.app",           // فقط وقتی destination=bazaar (جدید)
       "clicks": 142
     }
     // ...
@@ -47,6 +49,8 @@ GET {BASE_URL}/api/v2/api.php?app=<slug>&only=icons[&key=<api_key>]
 | `image_url` | بدون آن نمایش بی‌معنی است → آیتم را **رد کن** |
 | `click_url` | آدرس `click.php` — با تپ باز می‌شود؛ کلیک را ثبت و 302 می‌کند |
 | `download_url` | ⛔ هرگز با تپ باز نمی‌شود — فقط از طریق ریدایرکت `click_url` |
+| `destination` | **جدید (حالت پکیجی):** `bazaar` یعنی تپ باید خود اپ بازار را باز کند؛ `web` یعنی رفتار مرورگری قبلی. سرورهای قدیمی این فیلد را نمی‌دهند → با `web` رفتار کن |
+| `package_name` | **جدید:** نام پکیج اپ مقصد در کافه‌بازار (مثل `com.aistudio.ganjineysoal.feceff`) — فقط وقتی `destination=bazaar`. اگر `destination` نبود ولی `download_url`/`click_url` لینک `cafebazaar.ir/app/<pkg>` بود، پکیج را از همان تشخیص بده |
 | `title` | زیر آیکون نمایش داده می‌شود؛ اگر در پنل خالی باشد «؟؟؟؟» یا خالی می‌افتد — پر کردنش کار مالک پنل است، نه کد اپ |
 | `clicks` | فقط اطلاعاتی؛ برای منطق اپ استفاده نمی‌شود |
 
@@ -98,3 +102,18 @@ GET {BASE_URL}/api/v2/click.php?app=<slug>&slot=<n>
 - اپ فقط `click_url` را با `Intent.ACTION_VIEW` به مرورگر می‌سپارد — نه WebView، نه fetch داخل اپ.
 - User-Agent برنامکی (مثل curl) دنبال‌کنندهٔ ریدایرکت است ولی کلیک **شمرده نمی‌شود** (فیلتر ربات)
   → برای تست بدون آلودن آمار عالی است.
+
+### حالت پکیجی — `&via=app` (جدید) ⭐
+
+```
+GET {BASE_URL}/api/v2/click.php?app=<slug>&slot=<n>&via=app
+→ شمارش کلیک در DB + پاسخ 204 بدون ریدایرکت
+```
+
+وقتی مقصد تبلیغ کافه‌بازار است، اپ **خودش** `bazaar://details?id=<package_name>` را با
+`setPackage("com.farsitel.bazaar")` باز می‌کند (بدون مرورگر). برای اینکه آمار از دست نرود،
+اپ اول با یک درخواست پس‌زمینه (fire-and-forget) `click_url + &via=app` را صدا می‌زند:
+
+- فیلتر ربات برای `via=app` رد می‌شود (تپ واقعی کاربر است) و ضدتکرار ۶۰ ثانیه‌ای سر جایش است.
+- پاسخ 204 است — هیچ ریدایرکتی دنبال نمی‌شود و هیچ بدنه‌ای دانلود نمی‌شود.
+- اگر درخواست شکست خورد، هیچ‌چیز روی UI اثر نمی‌گذارد (فقط آمار همان یک کلیک نمی‌آید).

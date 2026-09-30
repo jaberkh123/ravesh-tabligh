@@ -12,8 +12,8 @@
 
 | # | Rule | Why |
 |---|------|-----|
-| 1 | **Always open `click_url`** when the user taps an ad. **Never** open `download_url` directly. | `click_url` is a redirect-tracker (`click.php`) that records the click, then 302-redirects to `download_url`. Bypassing it silently loses all statistics. |
-| 2 | Open `click_url` with an **Intent / Custom Tab** (a real browser), not with an in-app HTTP client. | The tracker filters bot User-Agents (`curl`, `wget`, `python`, `okhttp`-like, headless, empty UA). A raw HTTP GET from your app may be **redirected but not counted**. |
+| 1 | **Never open `download_url` directly.** For web destinations open `click_url`; for Bazaar destinations report the click first (`click_url` + `&via=app`, background GET) then open the Bazaar app via `bazaar://details?id=<package_name>` + `setPackage("com.farsitel.bazaar")`. | `click_url` is a redirect-tracker (`click.php`) that records the click. Opening the final link directly silently loses all statistics. `via=app` records the click without a redirect when the app itself opens Bazaar. |
+| 2 | Web destinations: open `click_url` with an **Intent / Custom Tab** (a real browser), not with an in-app HTTP client. | The tracker filters bot User-Agents (`curl`, `wget`, `python`, `okhttp`-like, headless, empty UA). A raw HTTP GET from your app may be **redirected but not counted**. (`&via=app` requests are exempt — they are explicit click reports.) |
 | 3 | Check the JSON `error` field, **not only the HTTP status code**. | Quirk: `no_category`, `no_ad`, `no_icon`, … return **HTTP 200** with an `error` field. |
 | 4 | Re-fetch after `next_slot_in` seconds. Do **not** rotate ads locally by shuffling. | Rotation is **server-side and time-based**; the server already reorders `ads[]` so the current ad is first. |
 | 5 | Respect the `ratio` field (`1:1` or `9:3`) when laying out images. | `1:1` = square banner/icon, `9:3` = wide banner. Wrong aspect ratio looks broken. |
@@ -109,6 +109,8 @@ GET https://golestanjaber.ir/api/v2/api.php?app=<slug>&only=all&key=<api_key>
       "image_url": "https://golestanjaber.ir/images/ad_20260920_090000_fe34ba21.png",
       "click_url": "https://golestanjaber.ir/api/v2/click.php?ad=31&r=1_1",
       "download_url": "https://example.com/sudoku",
+      "destination": "bazaar",
+      "package_name": "com.example.sudoku",
       "clicks": 402
     }
   ]
@@ -128,8 +130,10 @@ GET https://golestanjaber.ir/api/v2/api.php?app=<slug>&only=all&key=<api_key>
 | `count` | int | `ads.size`. |
 | `ads[]` | array | The rotating banner group, **current ad first**, then the rest in rotation order. Show item 0 (classic single-banner mode) or all of them (group mode). |
 | `ads[].slot` | int | Ad ID. Stable identifier — safe to use as a Compose `key()`. |
-| `ads[].click_url` | URL | **The URL to open on tap.** See Golden Rule 1. |
+| `ads[].click_url` | URL | **The tracker URL.** Web destination → open on tap. Bazaar destination → report the click with `&via=app` (§3). See Golden Rule 1. |
 | `ads[].download_url` | URL | Final destination (after the tracker's redirect). Informational — do not open directly. |
+| `ads[].destination` | string | `"web"` (browser behavior) or `"bazaar"` (open the Bazaar app directly). Absent on old servers → treat as `"web"`. |
+| `ads[].package_name` | string \| null | Bazaar package name of the destination app — meaningful only when `destination="bazaar"`. If `destination` is missing but `click_url`/`download_url` points to `cafebazaar.ir/app/<pkg>`, derive the package from the URL. |
 | `ads[].clicks` | int \| null | Lifetime click count (may be `null`). |
 | `icons_*` / `icons[]` | — | Same structure for the app's first active **icon** category. |
 
@@ -169,6 +173,21 @@ GET https://golestanjaber.ir/api/v2/click.php?ad=<id>&r=1_1|9_3
   2. Do not worry about rapid double invocations; the server dedups them.
   3. Do not build the tracker URL yourself — always use the `click_url` the API gave you (it already encodes `ad` and `r`).
 
+### 3.1 Package mode — `&via=app` (Bazaar ads)
+
+```
+GET https://golestanjaber.ir/api/v2/click.php?ad=<id>&r=1_1&via=app
+```
+
+When the ad's destination is Cafe Bazaar, the app opens **the Bazaar app itself**
+(`bazaar://details?id=<package_name>` with `setPackage("com.farsitel.bazaar")`) — no browser
+involved, so the redirect flow never runs. To keep the click counted, fire one background
+(fire-and-forget) GET of `click_url + "&via=app"` **before** launching Bazaar:
+
+- `via=app` bypasses the bot filter (it is an explicit user-tap report) and responds **204 No Content**
+  with no redirect — nothing extra is downloaded.
+- The 60-second dedup still applies; a failed ping is silently ignored (one lost stat, no UI impact).
+
 ---
 
 ## 4. Integration Plan (Android · Kotlin · Jetpack Compose)
@@ -180,7 +199,7 @@ Execute these steps in order. Do not skip the manifest or the click step.
 3. **Add data models + API client** (§5.3, §5.4).
 4. **Add an AdsViewModel** that loads the response, exposes UI state, and schedules the next fetch (§5.5).
 5. **Add Compose UI**: one banner slot (or a group row) + an icon strip (§5.6). Use the `ratio` field for aspect ratio.
-6. **Wire the click**: `ACTION_VIEW` on `click_url` (§5.6).
+6. **Wire the click**: `openAd(ctx, ad)` per item (Bazaar → direct app open + `via=app`; web → `click_url`) (§3, §3.1).
 7. **Handle every error path** from §2.4 by hiding the container — never crashing, never showing an empty gray box.
 8. **Test** against the checklist in §6 until every row passes.
 
@@ -377,8 +396,31 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 
-private fun openAd(context: android.content.Context, clickUrl: String?) {
-    val url = clickUrl?.takeIf { it.startsWith("http") } ?: return   // Golden Rule 1: click_url only
+private fun openAd(context: android.content.Context, ad: AdItem) {
+    // Bazaar package: server field, or auto-detected from legacy cafebazaar links
+    val pkg = ad.packageName?.takeIf { it.isNotBlank() }
+        ?: bazaarPackageFromUrl(ad.clickUrl)
+        ?: bazaarPackageFromUrl(ad.downloadUrl)
+    if (pkg != null) {
+        // 1) report the click (204, no redirect) — stats stay intact
+        pingClickCounter(ad.clickUrl)
+        // 2) open the Bazaar app directly — no browser, no chooser
+        val opened = runCatching {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse("bazaar://details?id=$pkg"))
+                    .setPackage("com.farsitel.bazaar")
+            )
+            true
+        }.getOrDefault(false)
+        if (opened) return
+        // 3) Bazaar not installed → its web page (stats already recorded)
+        runCatching {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://cafebazaar.ir/app/$pkg")))
+        }
+        return
+    }
+    // Web destination — classic behavior: browser opens click_url (count + redirect)
+    val url = ad.clickUrl?.takeIf { it.startsWith("http") } ?: return
     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
 }
 
@@ -406,7 +448,7 @@ private fun BannerCarousel(resp: TablighResponse) {
     LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         items(resp.ads, key = { it.slot }) { ad ->
             Card(Modifier.width(if (resp.ratio == "9:3") 320.dp else 160.dp)) {
-                Column(Modifier.clickable { openAd(ctx, ad.clickUrl) }) {
+                Column(Modifier.clickable { openAd(ctx, ad) }) {
                     AsyncImage(
                         model = ad.imageUrl,
                         contentDescription = ad.title,
@@ -434,7 +476,7 @@ private fun IconStrip(resp: TablighResponse) {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
                     .width(72.dp)
-                    .clickable { openAd(ctx, icon.clickUrl) },
+                    .clickable { openAd(ctx, icon) },
             ) {
                 AsyncImage(
                     model = icon.imageUrl,
@@ -489,7 +531,7 @@ curl -s -o /dev/null -w "%{http_code} -> %{redirect_url}\n" \
 |---|-------|----------|
 | 1 | App launch with network | Banner and/or icons render within ~2 s; nothing renders while loading. |
 | 2 | Aspect ratio | Square images are square; `9:3` banners are wide — per the `ratio` field. |
-| 3 | Tap banner/icon | Browser (or Custom Tab) opens `click_url`, then lands on the real destination. |
+| 3 | Tap banner/icon | Web destination → browser opens `click_url`, then lands on the real destination. Bazaar destination → background `&via=app` ping, then the Bazaar app opens directly on the package page. |
 | 4 | Stats increment | Owner sees the click counter rise in the panel (wait > 60 s or use another device — dedup window). |
 | 5 | Rotation | After `next_slot_in` the client re-fetches and a new first banner appears (server-side rotation). |
 | 6 | Airplane mode on launch | No crash, no ANR; ad section simply absent; core app features unaffected. |
@@ -506,7 +548,7 @@ curl -s -o /dev/null -w "%{http_code} -> %{redirect_url}\n" \
 The integration is complete **only when**:
 
 - [ ] The app compiles and the ad section renders with real server data.
-- [ ] Banner clicks and icon clicks go through `click_url` and land on the correct destination (check 4).
+- [ ] Banner clicks and icon clicks go through `click_url` (web) or `via=app` + `bazaar://details?id=` (Bazaar) and land on the correct destination (check 4).
 - [ ] All rows of the QA matrix (§6.2) pass.
 - [ ] Errors/offline hide the ad section without crashes.
 - [ ] The slug lives in exactly one place (`AdsConfig`), and the diff contains no credentials.
