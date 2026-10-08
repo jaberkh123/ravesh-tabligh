@@ -35,17 +35,44 @@ val displayIcons = remember(st.icons) { st.icons.shuffled() }
 > ⚠️ درس تجربی: «نمایش رندوم» دو برداشت دارد — (۱) انتخاب تک‌آیتمِ رندوم در یک بنر چرخان،
 > (۲) ترتیب رندومِ ردیف آیکون‌ها. منظور کاربر (۲) بود. پیش از پیاده‌سازی، از کاربر بپرس/مطمئن شو.
 
-## ۳.۳ انیمیشن ورود پلکانی ⭐ (جلب توجه به تبلیغ)
+## ۳.۳ انیمیشن ورود پلکانی ⭐ (جلب توجه به تبلیغ) — نسخهٔ v2 (فیکس باگ اسکرول)
 
-هر بار صفحه لود می‌شود، آیکون‌ها **از چپ به راست**، هر کدام **۱ ثانیه بعد از قبلی**، با
-fade-in نرم (~۰٫۷ ثانیه) ظاهر می‌شوند. کد کامل در `IconAdItem`:
+هر بار صفحه لود می‌شود، آیکون‌های **پنجرهٔ اول (۳ آیکون)** به‌صورت **از چپ به راست**، هر کدام
+**۱ ثانیه بعد از قبلی**، با fade-in نرم (~۰٫۷ ثانیه) ظاهر می‌شوند. آیکون‌های بیرون از پنجرهٔ اول
+فقط **بار اول** که با اسکرول وارد دید می‌شوند، با یک فید کوتاه (۲۵۰ms) می‌آیند — و بعد از آن
+**هرگز** در اسکرول‌های بعدی غیب و ظاهر نمی‌شوند.
 
 ```kotlin
-val appearAlpha = remember { Animatable(0f) }
+// سطح بنر — حافظهٔ «دیده‌شده‌ها» (در طول عمر بنر زنده می‌ماند؛ با refresh واقعی ریست می‌شود)
+val appearedSlots = remember(st.icons) { mutableStateSetOf<Int>() }
+itemsIndexed(displayIcons, key = { _, it -> it.slot }) { index, icon ->
+    IconAdItem(
+        icon = icon,
+        appearIndex = index,
+        alreadyShown = icon.slot in appearedSlots,
+        onAppeared = { appearedSlots.add(icon.slot) },
+        reloadKey = st.icons,
+        ...
+    )
+}
+```
+
+```kotlin
+// داخل IconAdItem (v2)
+val appearAlpha = remember { Animatable(if (alreadyShown) 1f else 0f) }
 LaunchedEffect(reloadKey, icon.slot) {
+    if (alreadyShown) {
+        if (appearAlpha.value < 1f) appearAlpha.snapTo(1f) // قبلاً دیده شده: بدون انیمیشن
+        return@LaunchedEffect
+    }
     appearAlpha.snapTo(0f)
-    delay(appearIndex * 1_000L)           // آیکون n → n ثانیه بعد از لود صفحه
-    appearAlpha.animateTo(1f, tween(700)) // fade-in نرم
+    onAppeared()                       // همین حالا علامت بزن تا هرگز تکرار نشود
+    if (appearIndex < 3) {
+        delay(appearIndex * 1_000L)    // پنجرهٔ اول: ورود پلکانی ۱ثانیه‌ای
+        appearAlpha.animateTo(1f, tween(700))
+    } else {
+        appearAlpha.animateTo(1f, tween(250)) // بیرون از پنجره: فید کوتاه، فقط بار اول
+    }
 }
 Column(modifier = Modifier
     .graphicsLayer { alpha = appearAlpha.value }   // بدون recomposition
@@ -54,11 +81,20 @@ Column(modifier = Modifier
 ```
 
 نکات فنی مهم:
-- `reloadKey = st.icons` — وقتی لیست تبلیغ refresh شود، `LaunchedEffect` با کلید جدید دوباره
-  اجرا می‌شود: `snapTo(0)` → انیمیشن از نو پخش می‌شود (با ترتیب شافل جدید).
+- ⚠️ **چرا v2؟ (باگ واقعی v1):** در v1 کل انیمیشن داخل آیتم Lazy بود؛ چون `LazyRow`
+  آیتم‌های خارج از دید را dispose/dobاره-compose می‌کند، اسکرول به راست «آمدن آهسته»
+  (تاخیر index×۱ثانیه برای هر آیتم تازه) و اسکرول به چپ «غیب و ظاهر شدن دوبارهٔ»
+  آیکون‌های قبلی ایجاد می‌کرد — باور کاربر این بود که «آیکون دوباره لود می‌شود» در
+  حالی که لود شده بود! جزئیات کامل در `05-pitfalls.md` «باگ ۱۱».
+- وضعیت «دیده‌شده» در **سطح بنر** (`appearedSlots`) است، نه داخل آیتم — پس بین
+  اسکرول‌ها زنده می‌ماند و هر آیکون فقط یک‌بار انیمیشن می‌گیرد.
+- `reloadKey = st.icons` + کلید `remember(st.icons)` روی `appearedSlots` — با refresh
+  واقعیِ داده از سرور، حافظه ریست و ورود پلکانی از نو پخش می‌شود (طراحیِ قانون ۷).
 - `appearIndex` از `itemsIndexed` می‌آید — چون ردیف LTR است، اندیس ۰ = چپ‌ترین آیکون.
 - انیمیشن روی `graphicsLayer { alpha }` است — **بدون recomposition**، روان.
-- چون **همهٔ صفحات** از همین کامپوننت مشترک استفاده می‌کنند، انیمیشن همه‌جا فعال است.
+- تصویر با `ImageRequest(memoryCacheKey = "tabligh-icon-<slot>", crossfade = false)` لود
+  می‌شود تا کش Coil پایدار بماند و خود Coil هم fade دوباره نسازد.
+- چون **همهٔ صفحات** از همین کامپوننت مشترک استفاده می‌کنند، رفتار v2 همه‌جا یکسان است.
 
 ## ۳.۴ بنر یکسان در همهٔ صفحات ⭐
 

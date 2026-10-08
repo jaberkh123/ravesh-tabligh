@@ -7,8 +7,17 @@
  *  محتوا:
  *   • AdSlot           — جایگاه خالی خط‌چین (وقتی تبلیغ خاموش است)
  *   • adRatioToAspect  — تبدیل «1:1»/«9:3» سرور به float
- *   • AdIconsBanner    — بنر اصلی: ۳ آیکون در عرض، ترتیب رندوم، ورود پلکانی
- *   • IconAdItem       — سلول هر آیکون: ۹۰٪ عرض، انیمیشن fade-in با تاخیر ۱ثانیه‌ای
+ *   • AdIconsBanner    — بنر اصلی: ۳ آیکون در عرض، ترتیب رندوم، ورود پلکانی (v2)
+ *   • IconAdItem       — سلول هر آیکون: ۹۰٪ عرض، انیمیشن ورود فقط یک‌بار (v2)
+ *
+ *  🆕 v2 — فیکس باگ اسکرول:
+ *   در v1، انیمیشن ورودِ هر آیکون با هر (re)composition دوباره پخش می‌شد؛ چون
+ *   LazyRow آیتم‌های خارج از دید را dispose می‌کند، اسکرول به راست باعث
+ *   «آمدن آهستهٔ» آیکون‌های جدید (تاخیر index×۱ثانیه) و اسکرول به چپ باعث
+ *   «غیب و ظاهر شدن دوبارهٔ» آیکون‌های قبلی می‌شد!
+ *   در v2 وضعیت «دیده‌شده» هر آیکون در سطحِ بنر (نه آیتم) نگه‌داری می‌شود:
+ *   هر آیکون فقط یک بار انیمیشن ورود می‌گیرد و در اسکرول‌های بعدی دیگر هرگز
+ *   غیب و ظاهر نمی‌شود — آیکون یک‌بار که لود شد، لودشده است.
  *
  *  ⚠️ نمادهای وابسته به اپ میزبان (خودت تطبیق بده):
  *   • AdManager / AdsUiState / IconAd  → از reference-code/AdManager.kt
@@ -166,7 +175,14 @@ fun AdIconsBanner(modifier: Modifier = Modifier) {
             // ردیف آیکون‌ها — ترتیب آیکون‌ها هر بار رندوم است (اولین آیکون هر fetch
             // می‌تواند متفاوت باشد)؛ جهتِ ردیف همیشه LTR می‌ماند تا آیکون‌های بیشتر
             // با اسکرول به سمتِ راست ظاهر شوند (مستقل از زبان دستگاه).
-            // ورود پلکانی: index هر آیتم → تأخیر ۱ثانیه‌ای پشت‌سرهم در IconAdItem.
+            //
+            // 🆕 v2 — حافظهٔ «آیکون‌های دیده‌شده» در سطح بنر:
+            // این مجموعه در طول عمر بنر (و بین اسکرول‌های LazyRow) زنده می‌ماند؛
+            // هر آیکون فقط یک بار انیمیشن ورود می‌گیرد و بعد از آن، در هر
+            // اسکرول (چپ/راست) فوراً و بدون هیچ انیمیشنی دیده می‌شود.
+            // کلید remember عمداً st.icons است: با refresh واقعیِ داده از سرور،
+            // مجموعه از نو ساخته می‌شود و ورود پلکانی طبق قانون ۷ دوباره پخش می‌شود.
+            val appearedSlots = remember(st.icons) { androidx.compose.runtime.mutableStateSetOf<Int>() }
             val displayIcons = remember(st.icons) { st.icons.shuffled() }
             CompositionLocalProvider(androidx.compose.ui.platform.LocalLayoutDirection provides androidx.compose.ui.unit.LayoutDirection.Ltr) {
                 LazyRow(
@@ -178,6 +194,8 @@ fun AdIconsBanner(modifier: Modifier = Modifier) {
                         IconAdItem(
                             icon = icon,
                             appearIndex = index,
+                            alreadyShown = icon.slot in appearedSlots,
+                            onAppeared = { appearedSlots.add(icon.slot) },
                             reloadKey = st.icons,
                             itemWidth = itemWidth,
                             aspect = iconAspect,
@@ -194,24 +212,58 @@ fun AdIconsBanner(modifier: Modifier = Modifier) {
 
 /**
  * سلول یک آیکون تبلیغ: تصویر ۹۰٪ عرض سلول + عنوان یک‌خطی زیر آن.
- * انیمیشن ورود پلکانی: هر بار صفحه لود می‌شود (یا لیست تبلیغ refresh می‌شود)
- * آیکون‌ها به ترتیب از چپ به راست ظاهر می‌شوند — هر آیکون ۱ ثانیه بعد از قبلی.
+ *
+ * 🆕 v2 — انیمیشن ورود فقط یک‌بار (فیکس باگ اسکرول):
+ *  • در v1، LaunchedEffect با هر compose دوباره از صفر پخش می‌شد؛ چون LazyRow
+ *    آیتم‌های خارج از دید را dispose می‌کند، اسکرول به راست «آمدن آهسته»
+ *    (تاخیر index×۱ثانیه) و اسکرول به چپ «غیب و ظاهر شدن مجدد» ایجاد می‌کرد.
+ *  • در v2:
+ *      – اگر آیکون قبلاً یک‌بار دیده شده (alreadyShown)، مستقیم و بدون هیچ
+ *        انیمیشنی نمایش داده می‌شود — در هیچ اسکرولی دیگر غیب/ظاهر نمی‌شود.
+ *      – ورود پلکانی ۱ثانیه‌ای فقط برای ۳ آیکونِ پنجرهٔ اولِ صفحه (قانون ۷) است؛
+ *        آیکون‌های بیرون از پنجره با یک فید کوتاه (۲۵۰ms) و فقط بار اول وارد
+ *        می‌شوند تا حس «لود دوباره» ندهد.
+ *      – تصویر با ImageRequest دارای memoryCacheKey ثابت و crossfade خاموش لود
+ *        می‌شود تا خود Coil هم هیچ‌گاه دوباره‌سازی بصری ایجاد نکند.
  */
 @Composable
 private fun IconAdItem(
     icon: IconAd,
     appearIndex: Int,
+    alreadyShown: Boolean,
+    onAppeared: () -> Unit,
     reloadKey: Any?,
     itemWidth: Dp,
     aspect: Float,
     titleColor: Color,
     onClick: () -> Unit
 ) {
-    val appearAlpha = remember { Animatable(0f) }
+    val appearAlpha = remember { Animatable(if (alreadyShown) 1f else 0f) }
     LaunchedEffect(reloadKey, icon.slot) {
+        if (alreadyShown) {
+            // قبلاً دیده شده: بدون هیچ انیمیشنی — فقط مطمئن شو کاملاً پیدا است.
+            if (appearAlpha.value < 1f) appearAlpha.snapTo(1f)
+            return@LaunchedEffect
+        }
         appearAlpha.snapTo(0f)
-        delay(appearIndex * 1_000L)           // آیکون n → n ثانیه بعد از لود صفحه
-        appearAlpha.animateTo(1f, tween(700)) // fade-in نرم ~۰٫۷ ثانیه
+        // از همین لحظه «دیده‌شده» علامت بخور تا حتی اگر آیتم وسط انیمیشن از دید
+        // خارج شد و دوباره برگشت، هیچ‌وقت انیمیشن از نو پخش نشود.
+        onAppeared()
+        if (appearIndex < 3) {
+            delay(appearIndex * 1_000L)           // پنجرهٔ اول: آیکون n → n ثانیه بعد
+            appearAlpha.animateTo(1f, tween(700)) // fade-in نرم ~۰٫۷ ثانیه
+        } else {
+            appearAlpha.animateTo(1f, tween(250)) // بیرون از پنجره: فید کوتاه، فقط بار اول
+        }
+    }
+
+    val imageCtx = androidx.compose.ui.platform.LocalContext.current
+    val imageModel = remember(icon.slot, icon.imageUrl, imageCtx) {
+        coil.request.ImageRequest.Builder(imageCtx)
+            .data(icon.imageUrl)
+            .memoryCacheKey("tabligh-icon-${icon.slot}")
+            .crossfade(false)
+            .build()
     }
 
     Column(
@@ -222,7 +274,7 @@ private fun IconAdItem(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         AsyncImage(
-            model = icon.imageUrl,
+            model = imageModel,
             contentDescription = icon.title,
             contentScale = ContentScale.Crop,
             modifier = Modifier
