@@ -182,7 +182,7 @@ fun AdIconsBanner(modifier: Modifier = Modifier) {
             // اسکرول (چپ/راست) فوراً و بدون هیچ انیمیشنی دیده می‌شود.
             // کلید remember عمداً st.icons است: با refresh واقعیِ داده از سرور،
             // مجموعه از نو ساخته می‌شود و ورود پلکانی طبق قانون ۷ دوباره پخش می‌شود.
-            val appearedSlots = remember(st.icons) { androidx.compose.runtime.mutableStateSetOf<Int>() }
+            val appearedSlots = remember(st.icons) { androidx.compose.runtime.mutableStateMapOf<Int, Boolean>() }
             val displayIcons = remember(st.icons) { st.icons.shuffled() }
             CompositionLocalProvider(androidx.compose.ui.platform.LocalLayoutDirection provides androidx.compose.ui.unit.LayoutDirection.Ltr) {
                 LazyRow(
@@ -195,7 +195,7 @@ fun AdIconsBanner(modifier: Modifier = Modifier) {
                             icon = icon,
                             appearIndex = index,
                             alreadyShown = icon.slot in appearedSlots,
-                            onAppeared = { appearedSlots.add(icon.slot) },
+                            onAppeared = { appearedSlots[icon.slot] = true },
                             reloadKey = st.icons,
                             itemWidth = itemWidth,
                             aspect = iconAspect,
